@@ -12,7 +12,7 @@ This script:
 1. Grabs your screen where the game is running
 2. Finds the pink ghostball
 3. Finds that stubby white aim line
-4. Extends it all the way to the edge so you see the full shot path
+4. Extends it all the way to the table rails or pockets so you see the full shot path
 5. Draws a cyan line overlay showing you exactly where you're aiming
 
 ---
@@ -44,18 +44,20 @@ Change these to match where your game window is:
 
 Create `line_detection_settings.json` in the same folder if you need to tweak detection. If you don't create it, defaults work for most setups.
 
+Here is an example configuration (values from `line_detection_settings.json`):
+
 ```json
 {
   "ghostball": {
-    "hsv_lower": [140, 50, 50],
-    "hsv_upper": [170, 255, 255],
-    "min_area": 200,
-    "max_area": 1000,
-    "min_circularity": 70
+    "hsv_lower": [128, 0, 176],
+    "hsv_upper": [180, 255, 255],
+    "min_area": 600,
+    "max_area": 1186,
+    "min_circularity": 19
   },
   "white_line": {
-    "hsv_lower": [0, 0, 200],
-    "hsv_upper": [180, 30, 255],
+    "hsv_lower": [0, 0, 243],
+    "hsv_upper": [180, 93, 255],
     "line_threshold": 30,
     "min_line_length": 20,
     "max_line_gap": 10
@@ -74,8 +76,11 @@ python balldetector.py
 A window pops up showing your game with overlays:
 - Black circle around the ghostball
 - Cyan line showing the extended aim path
+- Black lines showing the table rails
 
-Press `q` to quit.
+### Controls
+- `q`: Quit the application
+- `r`: Toggle rails overlay on/off
 
 ---
 
@@ -84,9 +89,9 @@ Press `q` to quit.
 ### Finding the ghostball
 
 1. Converts the frame to HSV (hue-saturation-value) color space
-2. Masks everything that isn't pink (hue 140-170)
+2. Masks everything that isn't pink/magenta (based on HSV settings)
 3. Finds blob outlines (contours) in that mask
-4. Filters by size (200-1000 pixels) and shape (at least 70% circular)
+4. Filters by size and shape (circularity)
 5. Grabs the center point of the best match
 
 ### Finding the aim line
@@ -100,8 +105,8 @@ Press `q` to quit.
 
 1. Takes the direction from the detected line segment
 2. Figures out which way points "away" from the ghostball
-3. Projects that direction until it hits the edge of the frame
-4. Draws from the ghostball center to that edge point
+3. Projects that direction until it hits the table rails or pocket gaps
+4. Draws from the ghostball center to that intersection point
 
 ---
 
@@ -129,7 +134,7 @@ HSV ranges in OpenCV:
 The white line might be dimmer than expected or broken up.
 
 Try:
-- Lower `hsv_lower[2]` (the V value) from 200 to something like 170
+- Lower `hsv_lower[2]` (the V value) to accept darker whites
 - Lower `min_line_length` if the line segment is really short
 - Raise `max_line_gap` if the line is dashed/broken
 
