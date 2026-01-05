@@ -107,73 +107,98 @@ def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings):
 
     return best_line
 
-# Extend the detected white line to the frame edge
-# The white line IS the aim line - just extend it in its existing direction
-# Parameters:
-#   - line: detected line segment (x1, y1, x2, y2) from HoughLinesP
-#   - frame_width, frame_height: dimensions of the capture frame
-#   - ghostball_center: (x, y) center position of the pink ball
-# Returns: (x1, y1, x2, y2) where line extends from ghostball to frame edge
-def extend_line_to_edges(line, frame_width, frame_height, ghostball_center):
+# Check if a point is on any of the rail segments
+def is_on_rail(point, tolerance=2.0):
+    x, y = point
+    for (start, end) in RAILS:
+        sx, sy = start
+        ex, ey = end
+
+        # Check if point is within the bounding box of the segment (plus tolerance)
+        min_x, max_x = min(sx, ex) - tolerance, max(sx, ex) + tolerance
+        min_y, max_y = min(sy, ey) - tolerance, max(sy, ey) + tolerance
+
+        if min_x <= x <= max_x and min_y <= y <= max_y:
+            # For strictly horizontal or vertical rails, this is sufficient checks
+            # because we are only checking against intersections with the infinite rail lines
+            return True
+    return False
+
+# Extend the detected white line to the rails or pockets
+# If it hits a rail, stop there. If it hits a pocket (gap), extend a bit further.
+def extend_line_to_rails(line, ghostball_center):
     # Unpack detected line endpoints
     x1, y1, x2, y2 = line
 
     # Calculate direction vector from detected line segment
-    # The white line already points in the correct aim direction
     dx = x2 - x1
     dy = y2 - y1
 
-    # Avoid division by zero for degenerate lines (no length)
+    # Avoid division by zero
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return line
 
-    # Normalize direction vector to unit length
+    # Normalize direction vector
     length = np.sqrt(dx**2 + dy**2)
     dx_norm = dx / length
     dy_norm = dy / length
 
-    # Determine which endpoint is closer to ghostball
+    # Ensure direction points away from ghostball
     gb_x, gb_y = ghostball_center
     dist1 = np.sqrt((x1 - gb_x)**2 + (y1 - gb_y)**2)
     dist2 = np.sqrt((x2 - gb_x)**2 + (y2 - gb_y)**2)
 
-    # If endpoint 2 is closer, reverse direction (point away from closer endpoint)
     if dist2 < dist1:
         dx_norm = -dx_norm
         dy_norm = -dy_norm
 
-    # Extend from ghostball in ONE direction only
-    # Line equation: P(t) = ghostball + t * direction (t > 0 only)
+    # Define table boundaries based on RAILS
+    # Derive Min/Max X and Y directly from the rail segments to ensure consistency
+    # Initialize with extreme values
+    min_x, max_x = float('inf'), float('-inf')
+    min_y, max_y = float('inf'), float('-inf')
+
+    for (start, end) in RAILS:
+        min_x = min(min_x, start[0], end[0])
+        max_x = max(max_x, start[0], end[0])
+        min_y = min(min_y, start[1], end[1])
+        max_y = max(max_y, start[1], end[1])
+
     t_values = []
 
-    # Check intersection with left and right frame edges
+    # Check intersection with infinite lines defining the table box
     if abs(dx_norm) > 1e-6:
-        t_left = -gb_x / dx_norm  # Left edge (x=0)
-        t_right = (frame_width - gb_x) / dx_norm  # Right edge
-        if t_left > 0:
-            t_values.append(t_left)
-        if t_right > 0:
-            t_values.append(t_right)
+        t_left = (min_x - gb_x) / dx_norm
+        t_right = (max_x - gb_x) / dx_norm
+        if t_left > 0: t_values.append((t_left, 'x_plane'))
+        if t_right > 0: t_values.append((t_right, 'x_plane'))
 
-    # Check intersection with top and bottom frame edges
     if abs(dy_norm) > 1e-6:
-        t_top = -gb_y / dy_norm  # Top edge (y=0)
-        t_bottom = (frame_height - gb_y) / dy_norm  # Bottom edge
-        if t_top > 0:
-            t_values.append(t_top)
-        if t_bottom > 0:
-            t_values.append(t_bottom)
+        t_top = (min_y - gb_y) / dy_norm
+        t_bottom = (max_y - gb_y) / dy_norm
+        if t_top > 0: t_values.append((t_top, 'y_plane'))
+        if t_bottom > 0: t_values.append((t_bottom, 'y_plane'))
 
-    # Find smallest positive t (first frame edge intersection)
-    if t_values:
-        t_min = min(t_values)
-        end_x = int(gb_x + t_min * dx_norm)
-        end_y = int(gb_y + t_min * dy_norm)
-        # Return line FROM ghostball TO frame edge
-        return (gb_x, gb_y, end_x, end_y)
+    if not t_values:
+        return (gb_x, gb_y, x2, y2)
 
-    # Fallback: return line from ghostball to far endpoint
-    return (gb_x, gb_y, x2, y2)
+    # Find closest intersection
+    t_min, _ = min(t_values, key=lambda x: x[0])
+
+    intersect_x = gb_x + t_min * dx_norm
+    intersect_y = gb_y + t_min * dy_norm
+
+    # Check if intersection is on a rail segment
+    if is_on_rail((intersect_x, intersect_y)):
+        end_x, end_y = int(intersect_x), int(intersect_y)
+    else:
+        # It's in a gap (pocket) - extend further by 40px
+        # "Anything in the gaps going a lil past box"
+        extension = 40.0
+        end_x = int(intersect_x + extension * dx_norm)
+        end_y = int(intersect_y + extension * dy_norm)
+
+    return (gb_x, gb_y, end_x, end_y)
 
 def load_settings():
     # Load settings from JSON file
@@ -274,7 +299,7 @@ def main():
                     line = detect_white_line(roi_hsv, roi_rect, ghostball_center, settings["white_line"])
                     if line is not None:
                         # Extend line from ghostball center in detected direction
-                        extended_line = extend_line_to_edges(line, monitor["width"], monitor["height"], ghostball_center)
+                        extended_line = extend_line_to_rails(line, ghostball_center)
                         x1, y1, x2, y2 = extended_line
                         # Draw 1-pixel cyan line overlay
                         # BGR format: (255, 255, 0) = Cyan
