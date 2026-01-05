@@ -56,6 +56,26 @@ RAILS = [
     ((1295, 125), (1295, 631))   # Right Rail
 ]
 
+# Pre-computed table bounding box from RAILS (performance optimization)
+# This is constant and never changes, so we calculate it once at module load
+TABLE_MIN_X = min(min(start[0], end[0]) for start, end in RAILS)
+TABLE_MAX_X = max(max(start[0], end[0]) for start, end in RAILS)
+TABLE_MIN_Y = min(min(start[1], end[1]) for start, end in RAILS)
+TABLE_MAX_Y = max(max(start[1], end[1]) for start, end in RAILS)
+
+# Pre-computed rail bounding boxes for fast collision detection
+# Each rail gets a pre-computed bounding box with tolerance applied
+RAIL_BOUNDS = []
+RAIL_TOLERANCE = 2.0
+for (start, end) in RAILS:
+    sx, sy = start
+    ex, ey = end
+    min_x = min(sx, ex) - RAIL_TOLERANCE
+    max_x = max(sx, ex) + RAIL_TOLERANCE
+    min_y = min(sy, ey) - RAIL_TOLERANCE
+    max_y = max(sy, ey) + RAIL_TOLERANCE
+    RAIL_BOUNDS.append((min_x, max_x, min_y, max_y))
+
 def get_circular_roi(image, center, radius):
     # Extracts a rectangular Region of Interest (ROI) that encompasses a circle
     # around a given center point. Validates boundaries to ensure we don't try to
@@ -92,7 +112,7 @@ def get_circular_roi(image, center, radius):
 
     return roi, (x1, y1, x2, y2)
 
-def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings):
+def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings, white_lower, white_upper):
     # Detects the short white aim line within the Region of Interest (ROI).
     # Uses HSV color thresholding and the Hough Line Transform.
     #
@@ -101,15 +121,15 @@ def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings):
     #     roi_rect (tuple): The (x1, y1, x2, y2) coordinates of the ROI in the full frame.
     #     ghostball_center (tuple): The (x, y) center of the detected ghostball.
     #     settings (dict): Dictionary containing detection parameters (HSV thresholds, etc).
+    #     white_lower (numpy.ndarray): Pre-computed lower HSV bound for white color.
+    #     white_upper (numpy.ndarray): Pre-computed upper HSV bound for white color.
     #
     # Returns:
     #     tuple: (x1, y1, x2, y2) coordinates of the best matching line in the *full frame*,
     #            or None if no valid line is found.
 
     # Create a binary mask where white pixels are 255 and others are 0
-    # Uses the lower and upper HSV bounds defined in settings
-    white_lower = np.array(settings["hsv_lower"])
-    white_upper = np.array(settings["hsv_upper"])
+    # Uses the pre-computed lower and upper HSV bounds
     white_mask = cv2.inRange(roi_hsv, white_lower, white_upper)
 
     # Apply Probabilistic Hough Line Transform to find line segments
@@ -129,8 +149,9 @@ def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings):
     # We need to map the ROI coordinates back to the full frame coordinates
     x1_offset, y1_offset = roi_rect[0], roi_rect[1]
 
-    min_dist = float('inf')
+    min_dist_sq = float('inf')
     best_line = None
+    max_dist_sq = MAX_ENDPOINT_DISTANCE ** 2  # Pre-compute squared threshold
 
     # Iterate through all detected lines to find the one originating from the ghostball
     for line in lines:
@@ -142,44 +163,36 @@ def detect_white_line(roi_hsv, roi_rect, ghostball_center, settings):
         x2_frame = x2 + x1_offset
         y2_frame = y2 + y1_offset
 
-        # Calculate Euclidean distance from both endpoints to the ghostball center
-        dist1 = np.sqrt((x1_frame - ghostball_center[0])**2 +
-                       (y1_frame - ghostball_center[1])**2)
-        dist2 = np.sqrt((x2_frame - ghostball_center[0])**2 +
-                       (y2_frame - ghostball_center[1])**2)
+        # Calculate squared distance from both endpoints to the ghostball center
+        # Using squared distances avoids expensive sqrt operations for comparisons
+        dist1_sq = (x1_frame - ghostball_center[0])**2 + (y1_frame - ghostball_center[1])**2
+        dist2_sq = (x2_frame - ghostball_center[0])**2 + (y2_frame - ghostball_center[1])**2
 
         # We care about the endpoint closest to the ghostball
-        min_endpoint_dist = min(dist1, dist2)
+        min_endpoint_dist_sq = min(dist1_sq, dist2_sq)
 
         # Filter: Is the line touching (or very close to) the ghostball?
         # And is it the closest line we've found so far?
-        if min_endpoint_dist <= MAX_ENDPOINT_DISTANCE and min_endpoint_dist < min_dist:
-            min_dist = min_endpoint_dist
+        if min_endpoint_dist_sq <= max_dist_sq and min_endpoint_dist_sq < min_dist_sq:
+            min_dist_sq = min_endpoint_dist_sq
             best_line = (x1_frame, y1_frame, x2_frame, y2_frame)
 
     return best_line
 
-def is_on_rail(point, tolerance=2.0):
+def is_on_rail(point):
     # Checks if a given point lies on any of the defined rail segments.
     # Used to determine if the projected line has hit a rail or a pocket.
+    # Uses pre-computed rail bounding boxes for performance.
     #
     # Args:
     #     point (tuple): (x, y) coordinates to check.
-    #     tolerance (float): The margin of error in pixels.
     #
     # Returns:
     #     bool: True if the point is considered to be on a rail, False otherwise.
     x, y = point
-    for (start, end) in RAILS:
-        sx, sy = start
-        ex, ey = end
 
-        # Define a bounding box around the rail segment with some tolerance
-        # Since rails are either horizontal or vertical, we just check bounds
-        min_x, max_x = min(sx, ex) - tolerance, max(sx, ex) + tolerance
-        min_y, max_y = min(sy, ey) - tolerance, max(sy, ey) + tolerance
-
-        # Check if the point falls within this bounding box
+    # Check against pre-computed rail bounding boxes
+    for min_x, max_x, min_y, max_y in RAIL_BOUNDS:
         if min_x <= x <= max_x and min_y <= y <= max_y:
             return True
 
@@ -214,24 +227,18 @@ def extend_line_to_rails(line, ghostball_center):
     # Ensure the direction vector points AWAY from the ghostball
     # We check which endpoint is further from the ghostball and aim that way
     gb_x, gb_y = ghostball_center
-    dist1 = np.sqrt((x1 - gb_x)**2 + (y1 - gb_y)**2)
-    dist2 = np.sqrt((x2 - gb_x)**2 + (y2 - gb_y)**2)
+    # Use squared distances to avoid expensive sqrt
+    dist1_sq = (x1 - gb_x)**2 + (y1 - gb_y)**2
+    dist2_sq = (x2 - gb_x)**2 + (y2 - gb_y)**2
 
-    if dist2 < dist1:
+    if dist2_sq < dist1_sq:
         # If the second point is closer, flip the direction
         dx_norm = -dx_norm
         dy_norm = -dy_norm
 
-    # Determine the bounding box of the table from the RAILS definitions
-    # We initialize with extreme values and narrow them down
-    min_x, max_x = float('inf'), float('-inf')
-    min_y, max_y = float('inf'), float('-inf')
-
-    for (start, end) in RAILS:
-        min_x = min(min_x, start[0], end[0])
-        max_x = max(max_x, start[0], end[0])
-        min_y = min(min_y, start[1], end[1])
-        max_y = max(max_y, start[1], end[1])
+    # Use pre-computed table bounding box (no need to recalculate from RAILS)
+    min_x, max_x = TABLE_MIN_X, TABLE_MAX_X
+    min_y, max_y = TABLE_MIN_Y, TABLE_MAX_Y
 
     # Ray Casting: Find intersection with the four planes defining the table box
     # Parametric line equation: P = P0 + t * V
@@ -328,6 +335,19 @@ def main():
     print("Settings loaded successfully")
     print()
 
+    # Pre-compute numpy arrays from settings (performance optimization)
+    # These arrays are created once instead of every frame
+    ghostball_lower = np.array(settings["ghostball"]["hsv_lower"])
+    ghostball_upper = np.array(settings["ghostball"]["hsv_upper"])
+    white_lower = np.array(settings["white_line"]["hsv_lower"])
+    white_upper = np.array(settings["white_line"]["hsv_upper"])
+
+    # Cache ghostball detection parameters
+    gb_min_area = settings["ghostball"]["min_area"]
+    gb_max_area = settings["ghostball"]["max_area"]
+    gb_min_circularity = settings["ghostball"]["min_circularity"] / 100.0
+    gb_early_exit_threshold = 0.85  # Exit early when we find a very circular object
+
     # Initialize MSS for screen capture
     # 'with' context manager ensures proper cleanup of resources
     with mss.mss() as sct:
@@ -362,26 +382,34 @@ def main():
                     cv2.line(display_frame, p1, p2, (0, 0, 0), 1)
 
             # 2. Detect the Ghostball
-            gb_settings = settings["ghostball"]
-            ghostball_lower = np.array(gb_settings["hsv_lower"])
-            ghostball_upper = np.array(gb_settings["hsv_upper"])
-
-            # Create a mask for the ghostball color
+            # Create a mask for the ghostball color using pre-computed bounds
             ghostball_mask = cv2.inRange(frame_hsv, ghostball_lower, ghostball_upper)
+
+            # Apply rail boundary mask to only search within the play area
+            # Create a rectangular mask for the table bounds
+            play_area_mask = np.zeros(ghostball_mask.shape, dtype=np.uint8)
+            cv2.rectangle(play_area_mask,
+                         (TABLE_MIN_X, TABLE_MIN_Y),
+                         (TABLE_MAX_X, TABLE_MAX_Y),
+                         255, -1)  # -1 fills the rectangle
+
+            # Combine ghostball mask with play area mask
+            ghostball_mask = cv2.bitwise_and(ghostball_mask, play_area_mask)
 
             # Find contours (blobs) in the mask
             contours, _ = cv2.findContours(ghostball_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             ghostball_center = None
 
             # Iterate through contours to find the best match (highest circularity)
+            # Using cached parameters for performance
             best_circularity = 0
             best_contour = None
 
             for contour in contours:
                 area = cv2.contourArea(contour)
 
-                # Check area constraints
-                if gb_settings["min_area"] <= area <= gb_settings["max_area"]:
+                # Check area constraints using cached values
+                if gb_min_area <= area <= gb_max_area:
                     perimeter = cv2.arcLength(contour, True)
                     if perimeter > 0:
                         # Calculate circularity: 4*pi*area / perimeter^2
@@ -389,10 +417,14 @@ def main():
                         circularity = 4 * np.pi * area / (perimeter ** 2)
 
                         # Check circularity constraint and track the best candidate
-                        if circularity >= (gb_settings["min_circularity"] / 100.0):
+                        if circularity >= gb_min_circularity:
                             if circularity > best_circularity:
                                 best_circularity = circularity
                                 best_contour = contour
+
+                                # Early exit: if we found a nearly perfect circle, no need to keep searching
+                                if circularity > gb_early_exit_threshold:
+                                    break
 
             # Draw and use the best matching ghostball
             if best_contour is not None:
@@ -411,8 +443,9 @@ def main():
                 roi_hsv, roi_rect = get_circular_roi(frame_hsv, ghostball_center, ROI_RADIUS)
 
                 if roi_hsv is not None and roi_rect is not None:
-                    # Detect the line within that ROI
-                    line = detect_white_line(roi_hsv, roi_rect, ghostball_center, settings["white_line"])
+                    # Detect the line within that ROI using pre-computed HSV arrays
+                    line = detect_white_line(roi_hsv, roi_rect, ghostball_center,
+                                            settings["white_line"], white_lower, white_upper)
 
                     if line is not None:
                         # Extend the detected line segment to the rails/pockets
