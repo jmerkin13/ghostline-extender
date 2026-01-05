@@ -373,7 +373,10 @@ def main():
             contours, _ = cv2.findContours(ghostball_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             ghostball_center = None
 
-            # Iterate through contours to find the one that matches our criteria
+            # Iterate through contours to find the best match (highest circularity)
+            best_circularity = 0
+            best_contour = None
+
             for contour in contours:
                 area = cv2.contourArea(contour)
 
@@ -385,18 +388,22 @@ def main():
                         # A perfect circle has circularity of 1.0
                         circularity = 4 * np.pi * area / (perimeter ** 2)
 
-                        # Check circularity constraint
+                        # Check circularity constraint and track the best candidate
                         if circularity >= (gb_settings["min_circularity"] / 100.0):
-                            # We found a match! Get the minimum enclosing circle center
-                            (x, y), radius = cv2.minEnclosingCircle(contour)
-                            center = (int(x), int(y))
+                            if circularity > best_circularity:
+                                best_circularity = circularity
+                                best_contour = contour
 
-                            # Draw detection marker (black circle) on display frame
-                            cv2.circle(display_frame, center, int(radius), (0, 0, 0), 1)
-                            cv2.circle(display_frame, center, 1, (0, 0, 0), 1)
+            # Draw and use the best matching ghostball
+            if best_contour is not None:
+                (x, y), radius = cv2.minEnclosingCircle(best_contour)
+                center = (int(x), int(y))
 
-                            ghostball_center = center
-                            break # Stop after finding the first valid ghostball
+                # Draw detection marker (black circle) on display frame
+                cv2.circle(display_frame, center, int(radius), (0, 0, 0), 1)
+                cv2.circle(display_frame, center, 1, (0, 0, 0), 1)
+
+                ghostball_center = center
 
             # 3. Detect and Extend the White Aim Line
             if ghostball_center is not None:
