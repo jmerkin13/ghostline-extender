@@ -29,6 +29,17 @@ ROI_RADIUS = 70
 # Line filtering - max distance from ghostball center to line endpoint
 MAX_ENDPOINT_DISTANCE = 5
 
+# Rail coordinates for overlay
+# Format: ((start_x, start_y), (end_x, end_y))
+RAILS = [
+    ((125, 80), (646, 80)),      # Top Left
+    ((732, 80), (1252, 80)),     # Top Right
+    ((125, 679), (646, 679)),    # Bottom Left
+    ((732, 679), (1252, 679)),   # Bottom Right
+    ((83, 125), (83, 631)),      # Left
+    ((1295, 125), (1295, 631))   # Right
+]
+
 def get_circular_roi(image, center, radius):
     # Extract circular ROI around center point with boundary validation
     h, w = image.shape[:2]
@@ -195,6 +206,7 @@ def main():
     print("=" * 60)
     print("Loading settings from", CONFIG_FILE)
     print("Press 'q' to quit")
+    print("Press 'r' to toggle rails overlay")
     print("=" * 60)
     print()
 
@@ -208,6 +220,9 @@ def main():
         window_name = "Balldetector - Live Detection"
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
+        # Toggle state for rails overlay
+        show_rails = True
+
         while True:
             start_time = time.time()
 
@@ -219,6 +234,11 @@ def main():
 
             # Create display frame
             display_frame = frame_bgr.copy()
+
+            # Draw rails overlay if enabled
+            if show_rails:
+                for p1, p2 in RAILS:
+                    cv2.line(display_frame, p1, p2, (0, 0, 0), 1)
 
             # Detect ghostball using contours
             gb_settings = settings["ghostball"]
@@ -272,6 +292,9 @@ def main():
             if key == ord('q'):
                 print("\nQuitting application...")
                 break
+            elif key == ord('r'):
+                show_rails = not show_rails
+                print(f"Rails overlay: {'On' if show_rails else 'Off'}")
 
         cv2.destroyAllWindows()
         print("Script terminated cleanly. All resources released.")
